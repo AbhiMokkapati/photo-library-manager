@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environment
+.venv/
+venv/
+
+# Runtime/user data — generated locally, not source (DB, thumbnails,
+# settings, and downloaded model weights like insightface/yolov8n.onnx)
+data/
+
+# PyInstaller build output
+build/
+dist/
+
+# Editor/OS cruft
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store

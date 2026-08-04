@@ -1,0 +1,27 @@
+# Core face recognition
+# 1.0.1 (not the older 0.7.x line) — ships a pure-Python wheel, so it installs
+# without needing MSVC Build Tools to compile a C extension
+insightface==1.0.1
+onnxruntime==1.18.1        # swap for onnxruntime-gpu if you have an NVIDIA GPU + CUDA installed
+opencv-python-headless==4.10.0.84
+
+# Image handling / EXIF
+Pillow==10.4.0
+pillow-heif==0.18.0        # lets Pillow (and thus cv2-based fallbacks) decode .heic/.heif files
+
+# Object detection
+# (runs on onnxruntime above; see core/object_engine.py for one-time model setup)
+
+# Clustering
+scikit-learn==1.5.1
+numpy==1.26.4
+
+# Windows drive detection (Windows only — skip if testing on macOS/Linux)
+pywin32==306; sys_platform == 'win32'
+WMI==1.5.1; sys_platform == 'win32'
+
+# GUI (added in the next milestone)
+PySide6==6.7.2
+
+# Packaging into a standalone .exe (added later)
+pyinstaller==6.10.0

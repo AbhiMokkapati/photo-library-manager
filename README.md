@@ -1,0 +1,143 @@
+# Photo Library Manager
+
+A native Windows app for face- and object-recognition-powered photo library
+management: auto-detects faces and common objects/scenes, groups faces into
+people you name once, lets you filter your library by person or object,
+proposes a folder/rename structure it only applies after you approve it, and
+can auto-index your external photo drive the moment you plug it in.
+
+## Milestone 3: Tray app + auto-index on drive connect (current)
+
+**This is the way to actually use the app day to day:**
+```
+python run_tray.py
+```
+This puts a tray icon in your Windows system tray and keeps running in the
+background. Plug in your external photo drive and it's detected by its
+volume serial number (stable across drive-letter changes) and indexing
+starts automatically — no clicking anything. A tray notification tells you
+when a drive was detected and whether indexing started.
+
+- **Left-click the tray icon** (or "Open Photo Library Manager") — opens the
+  full Library/People/Organize window. Closing that window just hides it;
+  the tray watcher keeps running.
+- **"Auto-index when a drive connects"** — checkable in the tray menu; turn
+  it off if you'd rather trigger indexing manually via the app's toolbar.
+- **Quit** — actually exits, stopping the drive watcher too.
+
+**Run it automatically at Windows startup:** press `Win+R`, type
+`shell:startup`, and drop a shortcut to `run_tray.py` (or the packaged
+`.exe`, once you build that — see below) in the folder that opens.
+
+This was smoke-tested by simulating a drive-connect event end-to-end
+(bypassing real USB hardware, which isn't available in a dev sandbox): the
+tray app correctly received the event, started background indexing, and
+the library reflected the new photos — confirmed before being handed to
+you. `core/drive_watcher.py` (the actual Windows drive-detection code, using
+win32api/WMI) can only run on Windows itself, so test that specific piece
+by literally plugging in a drive once you're on your machine.
+
+## Milestone 2: Desktop GUI (manual mode)
+
+If you'd rather not run the tray/background version, you can run just the
+window and index folders manually via the toolbar:
+```
+python run_gui.py
+```
+
+- **Toolbar → "Index a folder / drive..."** — pick a folder (or your whole
+  external drive once you've tested on a subset). Indexing runs in the
+  background with a progress bar; the window stays responsive.
+- **Library tab** — thumbnail grid of everything indexed. Filter by filename
+  or by recognized person. Double-click a photo for a detail view.
+- **People tab** — every detected face cluster shows as a card with a
+  representative thumbnail. Type a name once (e.g. "Mom") and it's applied
+  to every photo with that face. Cards also let you merge two clusters that
+  turned out to be the same person.
+- **Organize tab** — pick a sort scheme (by date / by person / both),
+  optionally enable renaming, click Preview to see exactly what would move
+  where, check/uncheck individual rows, then Apply. Nothing on disk changes
+  until you click Apply.
+- **"Re-cluster faces"** toolbar button — re-runs clustering on demand (also
+  runs automatically after each indexing pass).
+
+This was smoke-tested in a headless environment end-to-end: indexing via the
+background worker, face detection + clustering, naming a person, filtering
+the library by that person, and previewing a sort — all confirmed working
+before being handed to you.
+
+## Milestone 4: Object recognition + packaging (current)
+
+- **Object detection**: every indexed photo is also run through a YOLOv8n
+  object detector (`core/object_engine.py`), tagging common objects/scenes
+  (person, dog, car, food, ...). The Library tab has an "Object" filter next
+  to the existing person filter, and the Organize tab has a "By object" sort
+  scheme. One-time setup before this works (not needed for face recognition):
+  ```
+  pip install ultralytics
+  yolo export model=yolov8n.pt format=onnx imgsz=640
+  ```
+  then move the resulting `yolov8n.onnx` into `data/models/yolov8n.onnx`. If
+  it's missing, indexing still works fine — object detection is just skipped
+  with a console message, exactly like turning off face detection.
+
+- **Packaging**: build a standalone `.exe` with PyInstaller —
+  ```
+  .\build.ps1
+  ```
+  produces `dist\PhotoLibraryManager\PhotoLibraryManager.exe`. Copy the whole
+  `dist\PhotoLibraryManager\` folder wherever you want (it's a onedir build,
+  not a single file), then drop a shortcut to the `.exe` into `shell:startup`
+  for it to run automatically at login — no Python install needed anymore.
+
+---
+
+## Milestone 1: Core Engine
+
+The indexing/recognition engine underneath the GUI. You can also run it
+directly from the command line if you want to script something or test
+against a folder without the GUI.
+
+## What's in this milestone
+
+- `core/db.py` — SQLite schema: photos, faces, people, albums, drives
+- `core/exif_utils.py` — extracts date/camera/GPS from photos
+- `core/face_engine.py` — face detection + recognition embeddings (InsightFace)
+- `core/indexer.py` — walks a folder, hashes/dedupes, indexes everything
+- `core/clustering.py` — auto-groups detected faces into "people"
+- `core/auto_sort.py` — proposes folder structure / renaming, never moves files until you approve
+- `core/drive_watcher.py` — Windows-only: detects when an external drive is plugged in and auto-indexes it
+- `run_index.py` — command-line tool to run all of the above
+
+## Setup (on your Windows machine)
+
+1. Install Python 3.11 or 3.12 from python.org (check "Add to PATH" during install)
+2. Open a terminal in this folder and run:
+   ```
+   pip install -r requirements.txt
+   ```
+   First run will download ~300MB of face recognition model weights automatically.
+
+## Try it now
+
+Index a folder (start small — a subfolder with a few hundred photos — before pointing it at your whole drive):
+
+```
+python run_index.py "E:\Photos\2024" --cluster --propose-sort by_date_and_person
+```
+
+- `--cluster` groups detected faces into people (unnamed until you label them — that's a GUI feature next)
+- `--propose-sort` prints what a reorganization *would* look like, without touching any files
+- Drop `--cluster` for a faster first pass if you just want to see indexing speed on your library
+- Everything gets written to `data/library.db` (SQLite — you can open it with any DB browser to poke around)
+
+## What's next
+
+1. **GUI** (PySide6) — browse your library, see face clusters as tap-to-name cards, approve/edit sort proposals visually, review thumbnails in a grid
+2. **Drive auto-launch** — wire `drive_watcher.py` into a small always-on tray app so plugging in your external drive triggers indexing automatically, with a notification instead of you running commands
+3. **Packaging** — PyInstaller build so the whole thing is a double-click `.exe`, no Python install needed for daily use
+
+## Notes on accuracy tuning
+
+- `core/face_engine.py`: `_MIN_DET_SCORE` (currently 0.55) — raise if you're getting false-positive face detections, lower if faces are being missed
+- `core/clustering.py`: `DEFAULT_EPS` (0.35) and `MATCH_THRESHOLD` (0.55) — the classic clustering trade-off. Lower `eps`/higher threshold = fewer false merges (different people grouped together) but more over-splitting (same person split into multiple clusters). You'll want to tune these against your actual library once there's a GUI to review results in.

@@ -15,8 +15,12 @@ data/
 build/
 dist/
 
+# Inno Setup installer output
+Output/
+
 # Editor/OS cruft
 .vscode/
 .idea/
 Thumbs.db
 .DS_Store
+.claude/

@@ -14,6 +14,7 @@ import argparse
 import hashlib
 from pathlib import Path
 
+from core.app_logging import setup_logging
 from core.db import LibraryDB
 from core.indexer import Indexer
 from core.clustering import cluster_all_unassigned
@@ -27,6 +28,7 @@ def progress(current, total, path):
 
 
 def main():
+    setup_logging()
     parser = argparse.ArgumentParser(description="Index a photo folder/drive into the library database.")
     parser.add_argument("path", help="Folder or drive root to index, e.g. E:\\Photos")
     parser.add_argument("--no-faces", action="store_true", help="Skip face detection for a faster first pass")

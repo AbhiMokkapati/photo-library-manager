@@ -7,6 +7,8 @@
 # supporting files in that same folder — this is a onedir build, don't move
 # just the .exe on its own).
 
+python scripts\make_icon.py
+
 pyinstaller photo_manager.spec --noconfirm
 
 if ($LASTEXITCODE -eq 0) {

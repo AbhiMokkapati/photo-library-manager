@@ -8,6 +8,8 @@ opencv-python-headless==4.10.0.84
 # Image handling / EXIF
 Pillow==10.4.0
 pillow-heif==0.18.0        # lets Pillow (and thus cv2-based fallbacks) decode .heic/.heif files
+rawpy==0.27.0               # decodes camera RAW (.CR2/.NEF/.ARW/.DNG/...) — Pillow/cv2 can't
+exifread==3.5.1             # reads EXIF out of RAW files (Pillow can't open them to read EXIF either)
 
 # Object detection
 # (runs on onnxruntime above; see core/object_engine.py for one-time model setup)

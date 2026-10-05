@@ -16,13 +16,15 @@
 
 from PyInstaller.utils.hooks import collect_all
 
-datas = [("gui/assets/icon.png", "gui/assets")]
+datas = [("gui/assets/icon.png", "gui/assets"), ("gui/assets/icon.ico", "gui/assets")]
 binaries = []
-hiddenimports = ["pillow_heif", "cv2", "onnxruntime"]
+hiddenimports = ["pillow_heif", "cv2", "onnxruntime", "exifread"]
 
 # insightface loads some of its own package data/config at runtime that
-# PyInstaller's static analysis won't discover on its own.
-for pkg in ("insightface",):
+# PyInstaller's static analysis won't discover on its own. rawpy wraps
+# libraw as a compiled extension with its own bundled DLL, which needs the
+# same treatment.
+for pkg in ("insightface", "rawpy"):
     pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
     datas += pkg_datas
     binaries += pkg_binaries
@@ -53,8 +55,7 @@ exe = EXE(
     strip=False,
     upx=False,
     console=False,  # GUI app — no terminal window
-    # icon="gui/assets/icon.ico",  # PyInstaller needs an .ico (not .png) for
-    # the exe/taskbar icon; add one at that path and uncomment if you want it.
+    icon="gui/assets/icon.ico",
 )
 
 coll = COLLECT(

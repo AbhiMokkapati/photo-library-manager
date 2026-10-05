@@ -15,6 +15,7 @@ from core.db import LibraryDB
 from core.indexer import Indexer
 from core.face_engine import FaceEngine
 from core.clustering import cluster_all_unassigned
+from core.updates_manager import UpdateInfo, check_for_update, download_installer
 
 
 class IndexWorker(QThread):
@@ -65,5 +66,36 @@ class ClusterWorker(QThread):
             result = cluster_all_unassigned(db)
             db.close()
             self.finished_ok.emit(result)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class UpdateCheckWorker(QThread):
+    """Hits the GitHub Releases API in the background. Silent by design —
+    see core.updates_manager.check_for_update for why failures don't emit."""
+    update_available = Signal(object)   # UpdateInfo
+    no_update = Signal()
+
+    def run(self):
+        info = check_for_update()
+        if info is not None:
+            self.update_available.emit(info)
+        else:
+            self.no_update.emit()
+
+
+class UpdateDownloadWorker(QThread):
+    progress = Signal(int, int)   # bytes_read, total_bytes (total may be 0)
+    finished_ok = Signal(Path)    # path to downloaded installer
+    failed = Signal(str)
+
+    def __init__(self, info: UpdateInfo, parent=None):
+        super().__init__(parent)
+        self.info = info
+
+    def run(self):
+        try:
+            path = download_installer(self.info, on_progress=lambda r, t: self.progress.emit(r, t))
+            self.finished_ok.emit(path)
         except Exception as e:
             self.failed.emit(str(e))

@@ -46,6 +46,12 @@ CREATE TABLE IF NOT EXISTS photos (
     thumbnail_path TEXT,                   -- cached thumbnail on local disk
     status TEXT DEFAULT 'indexed',         -- indexed | needs_review | error
     indexed_at TEXT DEFAULT (datetime('now')),
+    detection_checked INTEGER DEFAULT 0,   -- 1 once face/object detection has run to
+                                            -- completion for this content, even if it
+                                            -- found nothing; distinguishes "no faces"
+                                            -- from "detection never ran/crashed", so a
+                                            -- failed attempt gets retried on the next
+                                            -- index run instead of being skipped forever
     UNIQUE(drive_id, relative_path)
 );
 
@@ -120,6 +126,17 @@ class LibraryDB:
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
         self.conn.commit()
+        self._migrate()
+
+    def _migrate(self):
+        """CREATE TABLE IF NOT EXISTS in SCHEMA doesn't add new columns to a
+        photos table created by an older version of the app — patch those in
+        by hand so existing libraries pick up new columns without a full
+        re-index."""
+        cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(photos)")}
+        if "detection_checked" not in cols:
+            self.conn.execute("ALTER TABLE photos ADD COLUMN detection_checked INTEGER DEFAULT 0")
+            self.conn.commit()
 
     def close(self):
         self.conn.close()
@@ -143,6 +160,9 @@ class LibraryDB:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def list_drives(self):
+        return self.conn.execute("SELECT * FROM drives ORDER BY last_seen_at DESC").fetchall()
 
     # ---------- photos ----------
     def get_photo_by_hash(self, content_hash: str):
@@ -181,6 +201,16 @@ class LibraryDB:
         row = cur.fetchone()
         return row is not None and row["file_mtime"] == file_mtime
 
+    def get_photo_by_location(self, drive_id: int, relative_path: str):
+        return self.conn.execute(
+            "SELECT * FROM photos WHERE drive_id=? AND relative_path=?",
+            (drive_id, relative_path),
+        ).fetchone()
+
+    def mark_detection_checked(self, photo_id: int):
+        self.conn.execute("UPDATE photos SET detection_checked=1 WHERE id=?", (photo_id,))
+        self.conn.commit()
+
     def record_photo(self, content_hash: str, drive_id: int, relative_path: str, **fields) -> int:
         """
         Insert/update a photo, correctly handling duplicate copies of the same
@@ -215,6 +245,50 @@ class LibraryDB:
         self.conn.commit()
         return existing["id"]
 
+    # ---------- duplicate copies ----------
+    def list_duplicate_groups(self):
+        """
+        Returns a list of {photo: <photos row>, locations: [<photo_locations
+        rows, each augmented with drive_label/drive_mount_path>]} — one entry
+        per photo that has at least one extra tracked copy elsewhere.
+        """
+        photo_ids = [r["photo_id"] for r in self.conn.execute(
+            "SELECT DISTINCT photo_id FROM photo_locations"
+        ).fetchall()]
+        groups = []
+        for photo_id in photo_ids:
+            photo = self.conn.execute("SELECT * FROM photos WHERE id=?", (photo_id,)).fetchone()
+            if photo is None:
+                continue
+            locations = self.conn.execute("""
+                SELECT pl.*, d.label AS drive_label, d.last_seen_path AS drive_mount_path
+                FROM photo_locations pl JOIN drives d ON pl.drive_id = d.id
+                WHERE pl.photo_id = ?
+                ORDER BY pl.first_seen_at
+            """, (photo_id,)).fetchall()
+            groups.append({"photo": photo, "locations": locations})
+        return groups
+
+    def delete_photo_location(self, location_id: int):
+        self.conn.execute("DELETE FROM photo_locations WHERE id=?", (location_id,))
+        self.conn.commit()
+
+    def promote_photo_location(self, location_id: int):
+        """
+        Makes this secondary location the new primary (photos row), replacing
+        the current primary's drive_id/relative_path/filename/file_mtime, then
+        removes the now-redundant photo_locations row.
+        """
+        loc = self.conn.execute("SELECT * FROM photo_locations WHERE id=?", (location_id,)).fetchone()
+        if loc is None:
+            return
+        self.conn.execute(
+            "UPDATE photos SET drive_id=?, relative_path=?, filename=?, file_mtime=? WHERE id=?",
+            (loc["drive_id"], loc["relative_path"], loc["filename"], loc["file_mtime"], loc["photo_id"]),
+        )
+        self.conn.execute("DELETE FROM photo_locations WHERE id=?", (location_id,))
+        self.conn.commit()
+
     # ---------- faces ----------
     def insert_face(self, photo_id: int, bbox, embedding: np.ndarray, det_score: float) -> int:
         cur = self.conn.execute(
@@ -224,9 +298,12 @@ class LibraryDB:
         self.conn.commit()
         return cur.lastrowid
 
-    def all_faces_with_embeddings(self):
-        """Returns list of (face_id, person_id, embedding_ndarray) for clustering."""
-        cur = self.conn.execute("SELECT id, person_id, embedding FROM faces")
+    def unconfirmed_faces_with_embeddings(self):
+        """Returns list of (face_id, person_id, embedding_ndarray) for every face
+        the user hasn't manually confirmed yet — the candidate pool for clustering.
+        Filtered in SQL rather than fetched-then-checked-per-row, since the latter
+        means one extra round trip per face for a library-wide operation."""
+        cur = self.conn.execute("SELECT id, person_id, embedding FROM faces WHERE confirmed = 0")
         out = []
         for row in cur.fetchall():
             emb = np.frombuffer(row["embedding"], dtype=np.float32)
@@ -239,6 +316,49 @@ class LibraryDB:
             (person_id, int(confirmed), face_id),
         )
         self.conn.commit()
+
+    def list_unassigned_faces(self):
+        """Faces the algorithm detected but couldn't confidently cluster
+        (DBSCAN noise, or a new face that didn't match any existing person)
+        — candidates for the user to tag by hand."""
+        return self.conn.execute(
+            "SELECT faces.*, photos.thumbnail_path, photos.width AS photo_width, "
+            "photos.height AS photo_height, photos.filename "
+            "FROM faces JOIN photos ON photos.id = faces.photo_id "
+            "WHERE faces.person_id IS NULL "
+            "ORDER BY faces.id DESC"
+        ).fetchall()
+
+    def list_unconfirmed_faces(self):
+        """Faces auto-assigned to a person (by clustering or the fast-match
+        path) that the user hasn't confirmed or rejected yet."""
+        return self.conn.execute(
+            "SELECT faces.*, photos.thumbnail_path, photos.width AS photo_width, "
+            "photos.height AS photo_height, photos.filename, "
+            "people.name AS person_name, people.id AS suggested_person_id "
+            "FROM faces "
+            "JOIN photos ON photos.id = faces.photo_id "
+            "JOIN people ON people.id = faces.person_id "
+            "WHERE faces.person_id IS NOT NULL AND faces.confirmed = 0 "
+            "ORDER BY faces.id DESC"
+        ).fetchall()
+
+    def confirm_face(self, face_id: int):
+        self.conn.execute("UPDATE faces SET confirmed=1 WHERE id=?", (face_id,))
+        self.conn.commit()
+
+    def reject_face_assignment(self, face_id: int):
+        """Kicks a wrongly-suggested face back into the unassigned pool
+        rather than leaving it under the wrong person."""
+        self.conn.execute("UPDATE faces SET person_id=NULL, confirmed=0 WHERE id=?", (face_id,))
+        self.conn.commit()
+
+    def review_counts(self):
+        unassigned = self.conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id IS NULL").fetchone()["c"]
+        unconfirmed = self.conn.execute(
+            "SELECT COUNT(*) c FROM faces WHERE person_id IS NOT NULL AND confirmed = 0"
+        ).fetchone()["c"]
+        return {"unassigned": unassigned, "unconfirmed": unconfirmed}
 
     # ---------- objects ----------
     def insert_object(self, photo_id: int, label: str, confidence: float, bbox) -> int:
@@ -273,6 +393,9 @@ class LibraryDB:
 
     def list_people(self):
         return self.conn.execute("SELECT * FROM people ORDER BY name IS NULL, name").fetchall()
+
+    def get_person(self, person_id: int):
+        return self.conn.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
 
     # ---------- stats ----------
     def stats(self):

@@ -18,8 +18,11 @@ import sys
 import time
 import string
 import ctypes
+import logging
 import threading
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 if sys.platform != "win32":
     raise ImportError("drive_watcher.py is Windows-only. It uses win32api/WMI, "
@@ -94,7 +97,7 @@ class DriveWatcher:
     def run_forever(self):
         """Blocking loop — run this in a background thread from the main app,
         or as the entry point of a small always-on tray process."""
-        print("[drive_watcher] watching for external drives...")
+        logger.info("watching for external drives...")
         while not self._stop_event.is_set():
             current = set(self._current_drive_letters())
             new_letters = current - self._known_letters
@@ -103,13 +106,13 @@ class DriveWatcher:
                     serial = get_volume_serial(letter)
                     label = get_volume_label(letter)
                     if serial:
-                        print(f"[drive_watcher] detected drive {letter} (serial {serial}, label '{label}')")
+                        logger.info("detected drive %s (serial %s, label %r)", letter, serial, label)
                         self.on_drive_connected(letter, serial, label)
             self._known_letters = current
             # wait() returns early as soon as stop() is called, instead of
             # blocking for the full poll interval before noticing the request
             self._stop_event.wait(self.poll_interval_seconds)
-        print("[drive_watcher] stopped.")
+        logger.info("stopped.")
 
 
 def default_on_drive_connected(drive_letter, serial, label):
@@ -127,9 +130,9 @@ def default_on_drive_connected(drive_letter, serial, label):
     db = LibraryDB()
     drive_id = db.upsert_drive(serial, label, drive_letter)
     indexer = Indexer(db, thumbnail_dir=THUMBNAIL_DIR)
-    print(f"[drive_watcher] starting incremental index of {drive_letter}...")
+    logger.info("starting incremental index of %s...", drive_letter)
     result = indexer.index_drive(Path(drive_letter), drive_id)
-    print(f"[drive_watcher] indexed {result['scanned']} files from {drive_letter}")
+    logger.info("indexed %s files from %s", result["scanned"], drive_letter)
     db.close()
 
 

@@ -13,15 +13,19 @@ only processes what's new.
 """
 
 import hashlib
+import logging
 from pathlib import Path
 from PIL import Image
 
 from .db import LibraryDB
-from .exif_utils import extract_metadata
+from .exif_utils import extract_metadata, load_image_bgr, is_raw, RAW_EXTENSIONS
 from .face_engine import FaceEngine
 from .object_engine import ObjectEngine
+from .clustering import match_new_face_to_person
 
-SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".bmp", ".tiff", ".webp"}
+logger = logging.getLogger(__name__)
+
+SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".bmp", ".tiff", ".webp"} | RAW_EXTENSIONS
 THUMBNAIL_SIZE = (320, 320)
 
 
@@ -39,10 +43,22 @@ def make_thumbnail(src_path: Path, dest_dir: Path, content_hash: str) -> str:
     if dest_path.exists():
         return str(dest_path)
     try:
-        with Image.open(src_path) as img:
+        if is_raw(src_path):
+            # Pillow can't open RAW files at all; reuse the same rawpy-based
+            # decode path used for face/object detection
+            import cv2
+            bgr = load_image_bgr(src_path)
+            if bgr is None:
+                return None
+            img = Image.fromarray(cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB))
             img = img.convert("RGB")
             img.thumbnail(THUMBNAIL_SIZE)
             img.save(dest_path, "JPEG", quality=85)
+        else:
+            with Image.open(src_path) as img:
+                img = img.convert("RGB")
+                img.thumbnail(THUMBNAIL_SIZE)
+                img.save(dest_path, "JPEG", quality=85)
         return str(dest_path)
     except Exception:
         return None
@@ -63,7 +79,7 @@ class Indexer:
             except FileNotFoundError as e:
                 # object model isn't set up yet (see object_engine.py docstring for
                 # setup steps) — don't fail the whole indexing run over it
-                print(f"[indexer] object detection disabled: {e}")
+                logger.info("object detection disabled: %s", e)
                 detect_objects = False
         self.object_engine = object_engine
         self.detect_objects = detect_objects
@@ -75,28 +91,40 @@ class Indexer:
         all_files = [p for p in root_path.rglob("*") if p.suffix.lower() in SUPPORTED_EXTENSIONS]
         total = len(all_files)
 
+        errors = []
         for i, file_path in enumerate(all_files, start=1):
             if self.progress_callback:
                 self.progress_callback(i, total, file_path)
             try:
                 self._index_one_file(file_path, root_path, drive_id)
             except Exception as e:
-                # never let one bad file kill the whole run
-                print(f"[indexer] skipped {file_path}: {e}")
+                # never let one bad file kill the whole run — but do keep a
+                # record of it. Because detection_checked only gets set after
+                # a clean run, a file that fails here is automatically retried
+                # on the next index_drive() call instead of being silently
+                # skipped forever.
+                logger.exception("skipped %s", file_path)
+                errors.append(f"{file_path}: {e}")
 
-        return {"scanned": total}
+        return {"scanned": total, "errors": errors}
 
     def _index_one_file(self, file_path: Path, root_path: Path, drive_id: int):
         relative_path = str(file_path.relative_to(root_path))
         stat = file_path.stat()
         file_mtime = str(stat.st_mtime)
+        wants_detection = self.detect_faces or self.detect_objects
 
-        # skip unchanged files already in the index (incremental re-scan)
-        if self.db.photo_exists_unchanged(drive_id, relative_path, file_mtime):
+        existing = self.db.get_photo_by_location(drive_id, relative_path)
+        unchanged = existing is not None and existing["file_mtime"] == file_mtime
+        already_detected = existing is not None and existing["detection_checked"]
+
+        # skip unchanged files that have already had detection run (successfully)
+        # against them — incremental re-scan. A file whose detection previously
+        # crashed (detection_checked still 0) falls through and gets retried.
+        if unchanged and (already_detected or not wants_detection):
             return
 
         content_hash = hash_file(file_path)
-        is_new_content = self.db.get_photo_by_hash(content_hash) is None
         meta = extract_metadata(file_path)
         thumb_path = make_thumbnail(file_path, self.thumbnail_dir, content_hash)
 
@@ -119,16 +147,25 @@ class Indexer:
         )
 
         # faces/objects are stored per unique content, not per location, so
-        # only run detection the first time this content hash is seen
-        if not is_new_content:
+        # only run detection once per content hash — but re-run it if the
+        # earlier attempt for this content never completed successfully.
+        canonical = self.db.get_photo_by_hash(content_hash)
+        if canonical["detection_checked"] or not wants_detection:
             return
 
         if self.detect_faces and self.face_engine:
-            faces = self.face_engine.detect_and_embed(file_path)
+            faces = self.face_engine.detect_and_embed(file_path, orig_size=(meta["width"], meta["height"]))
             for f in faces:
-                self.db.insert_face(photo_id, f["bbox"], f["embedding"], f["det_score"])
+                face_id = self.db.insert_face(canonical["id"], f["bbox"], f["embedding"], f["det_score"])
+                # fast path: if this face clearly matches an existing person, assign it
+                # now (still unconfirmed — shows up in "Needs confirmation", a one-click
+                # review, instead of "Unassigned"). Full cluster_all_unassigned() still
+                # runs after the batch for anything this doesn't confidently match.
+                match_new_face_to_person(self.db, face_id, f["embedding"])
 
         if self.detect_objects and self.object_engine:
             objects = self.object_engine.detect(file_path)
             for o in objects:
-                self.db.insert_object(photo_id, o["label"], o["confidence"], o["bbox"])
+                self.db.insert_object(canonical["id"], o["label"], o["confidence"], o["bbox"])
+
+        self.db.mark_detection_checked(canonical["id"])

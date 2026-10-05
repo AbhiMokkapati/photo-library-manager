@@ -14,6 +14,8 @@ DEFAULTS = {
     "auto_cluster_after_index": True,
     "detect_faces_on_index": True,
     "detect_objects_on_index": True,
+    "last_drive_id": None,
+    "check_for_updates": True,
 }
 
 

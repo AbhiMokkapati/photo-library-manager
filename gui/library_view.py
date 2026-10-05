@@ -6,12 +6,14 @@ with a date/person filter bar above it and a larger preview on click.
 from pathlib import Path
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QListWidget, QListWidgetItem,
-    QListView, QLineEdit, QComboBox, QLabel, QDialog, QPushButton
+    QListView, QLineEdit, QComboBox, QLabel, QDialog, QPushButton, QSlider
 )
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtCore import Qt, QSize, QTimer
 
-THUMB_ICON_SIZE = QSize(160, 160)
+DEFAULT_THUMB_SIZE = 160
+MIN_THUMB_SIZE = 80
+MAX_THUMB_SIZE = 320
 BATCH_SIZE = 200  # items added per event-loop tick, so huge libraries don't freeze the UI on load
 
 
@@ -21,11 +23,14 @@ class PhotoPreviewDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(photo_row["filename"])
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
         img_label = QLabel()
+        img_label.setAlignment(Qt.AlignCenter)
         pix = QPixmap(photo_row["thumbnail_path"]) if photo_row["thumbnail_path"] else QPixmap()
         if not pix.isNull():
-            pix = pix.scaledToWidth(600, Qt.SmoothTransformation)
+            pix = pix.scaledToWidth(680, Qt.SmoothTransformation)
         img_label.setPixmap(pix)
         layout.addWidget(img_label)
 
@@ -37,9 +42,13 @@ class PhotoPreviewDialog(QDialog):
             f"Objects: {', '.join(object_labels) if object_labels else 'None detected'}",
             f"Path: {photo_row['relative_path']}",
         ]
-        layout.addWidget(QLabel("\n".join(info_lines)))
+        info_label = QLabel("\n".join(info_lines))
+        info_label.setObjectName("sectionLabel")
+        info_label.setStyleSheet("color: #98989d; font-weight: 400; letter-spacing: 0;")
+        layout.addWidget(info_label)
 
         close_btn = QPushButton("Close")
+        close_btn.setObjectName("primaryButton")
         close_btn.clicked.connect(self.accept)
         layout.addWidget(close_btn)
 
@@ -51,9 +60,12 @@ class LibraryView(QWidget):
         self._rows = []
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
 
         # --- filter bar ---
         filter_bar = QHBoxLayout()
+        filter_bar.setSpacing(10)
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("Search filename...")
         self.search_box.textChanged.connect(self.refresh)
@@ -72,20 +84,35 @@ class LibraryView(QWidget):
         filter_bar.addWidget(self.person_filter)
         filter_bar.addWidget(QLabel("Object:"))
         filter_bar.addWidget(self.object_filter)
+
+        filter_bar.addWidget(QLabel("Thumbnail size:"))
+        self.thumb_size_slider = QSlider(Qt.Horizontal)
+        self.thumb_size_slider.setMinimum(MIN_THUMB_SIZE)
+        self.thumb_size_slider.setMaximum(MAX_THUMB_SIZE)
+        self.thumb_size_slider.setValue(DEFAULT_THUMB_SIZE)
+        self.thumb_size_slider.setMaximumWidth(120)
+        self.thumb_size_slider.valueChanged.connect(self._on_thumb_size_changed)
+        filter_bar.addWidget(self.thumb_size_slider)
         layout.addLayout(filter_bar)
 
         # --- grid ---
         self.grid = QListWidget()
         self.grid.setViewMode(QListView.IconMode)
-        self.grid.setIconSize(THUMB_ICON_SIZE)
+        self.grid.setIconSize(QSize(DEFAULT_THUMB_SIZE, DEFAULT_THUMB_SIZE))
         self.grid.setResizeMode(QListView.Adjust)
-        self.grid.setSpacing(8)
+        self.grid.setSpacing(6)
         self.grid.setWordWrap(True)
+        self.grid.setUniformItemSizes(False)
+        self.grid.setSelectionMode(QListWidget.ExtendedSelection)
+        self.grid.setMovement(QListView.Static)
         self.grid.itemDoubleClicked.connect(self._open_preview)
         layout.addWidget(self.grid)
 
         self.status_label = QLabel("0 photos")
         layout.addWidget(self.status_label)
+
+    def _on_thumb_size_changed(self, value):
+        self.grid.setIconSize(QSize(value, value))
 
     def refresh_person_filter(self):
         db = self.get_db()

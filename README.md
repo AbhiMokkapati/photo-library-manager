@@ -90,6 +90,54 @@ before being handed to you.
   not a single file), then drop a shortcut to the `.exe` into `shell:startup`
   for it to run automatically at login — no Python install needed anymore.
 
+## Milestone 5: Dashboard, duplicates, IMG_#### renaming, installer (current)
+
+- **Dashboard tab** (now the first tab): library stats at a glance (photos,
+  faces, people, objects, duplicate groups) and a list of every drive/folder
+  you've ever indexed, each with a "Use this drive" button. The toolbar also
+  has an "Active drive" dropdown — whichever drive you pick there (or last had
+  active) is what the Organize and Duplicates tabs operate on, and it's
+  remembered across restarts, so you don't need to re-browse to a folder every
+  time you reopen the app.
+- **Duplicates tab**: reviews the exact-duplicate copies the indexer already
+  tracks whenever the same photo turns up on more than one drive/folder. Each
+  group shows every copy as a "keep this one" choice; applying deletes every
+  other copy from disk and updates the database. Byte-identical duplicates
+  only (not visually-similar-but-different photos).
+- **IMG_#### renaming**: in the Organize tab, click "IMG_#### preset" to
+  rename files sequentially in date-taken order (`IMG_0001.jpg`, `IMG_0002.jpg`,
+  ...) instead of whatever random name they came with. Like all renaming
+  here, nothing happens until you click Apply, and re-previewing after
+  applying shows no further changes (it's idempotent).
+- **Thumbnail size slider** in the Library tab.
+- **Installer**: build a proper Windows installer (Start Menu entry — shows
+  up in Windows search — Desktop shortcut, uninstaller) instead of just a raw
+  `.exe` folder:
+  ```
+  .\build_installer.ps1
+  ```
+  produces `Output\PhotoLibraryManagerSetup.exe`. One-time setup on the build
+  machine (not needed by whoever runs the installer):
+  ```
+  winget install JRSoftware.InnoSetup
+  ```
+
+## Milestone 6: Update manager (current)
+
+- **Auto-update checks**: the tray app checks GitHub Releases for
+  `abhimokkapati/photo-manager` a few seconds after launch (silently — a
+  failed/offline check never bugs you). If a newer version is published,
+  a dialog offers to download and run the new installer, then quits the
+  running app so the installer can overwrite its files. Toggle this from
+  the tray menu ("Check for updates on startup"), or trigger it manually
+  with "Check for updates now".
+- **Cutting a release**: bump `core/version.py`'s `__version__`, run
+  `.\build_installer.ps1` (it now reads that version and passes it into
+  Inno Setup, so `installer.iss` never drifts out of sync), then create a
+  GitHub Release on the repo tagged `vX.Y.Z` and attach the resulting
+  `Output\PhotoLibraryManagerSetup.exe` as a release asset — the update
+  checker looks for an asset whose name ends in `Setup.exe`.
+
 ---
 
 ## Milestone 1: Core Engine

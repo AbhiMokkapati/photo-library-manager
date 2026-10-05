@@ -19,8 +19,11 @@ class SortView(QWidget):
         self._proposals = []
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 16, 20, 16)
+        layout.setSpacing(12)
 
         controls = QHBoxLayout()
+        controls.setSpacing(10)
         controls.addWidget(QLabel("Scheme:"))
         self.scheme_combo = QComboBox()
         self.scheme_combo.addItem("By date", "by_date")
@@ -33,8 +36,13 @@ class SortView(QWidget):
         controls.addWidget(self.rename_checkbox)
 
         self.rename_pattern = QLineEdit("{date}_{names}{ext}")
-        self.rename_pattern.setToolTip("Tokens: {date} {time} {names} {camera} {orig} {ext}")
+        self.rename_pattern.setToolTip("Tokens: {date} {time} {names} {camera} {orig} {ext} {counter}")
         controls.addWidget(self.rename_pattern)
+
+        img_preset_btn = QPushButton("IMG_#### preset")
+        img_preset_btn.setToolTip("Rename files sequentially like IMG_0001.jpg, in date-taken order")
+        img_preset_btn.clicked.connect(self._use_img_counter_preset)
+        controls.addWidget(img_preset_btn)
 
         preview_btn = QPushButton("Preview")
         preview_btn.clicked.connect(self.preview)
@@ -43,6 +51,9 @@ class SortView(QWidget):
 
         self.table = QTableWidget(0, 3)
         self.table.setHorizontalHeaderLabels(["Apply?", "Current path", "Proposed path"])
+        self.table.setAlternatingRowColors(True)
+        self.table.verticalHeader().setVisible(False)
+        self.table.setSelectionBehavior(QTableWidget.SelectRows)
         layout.addWidget(self.table)
 
         bottom = QHBoxLayout()
@@ -57,8 +68,13 @@ class SortView(QWidget):
             "Nothing on disk changes until you click Apply. Rows only move within "
             "the same drive/folder tree currently being viewed."
         )
+        note.setObjectName("sectionLabel")
         note.setWordWrap(True)
         layout.addWidget(note)
+
+    def _use_img_counter_preset(self):
+        self.rename_pattern.setText("IMG_{counter}{ext}")
+        self.rename_checkbox.setChecked(True)
 
     def preview(self):
         db = self.get_db()

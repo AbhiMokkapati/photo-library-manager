@@ -73,15 +73,17 @@ def _parse_date(date_str):
         return None
 
 
-def rename_pattern(photo_row, person_names, pattern: str = "{date}_{names}{ext}") -> str:
+def rename_pattern(photo_row, person_names, pattern: str = "{date}_{names}{ext}", counter: str = "0000") -> str:
     """
     Builds a new filename from a pattern string. Supported tokens:
-      {date}   -> YYYY-MM-DD, or 'unknown-date'
-      {time}   -> HHMMSS
-      {names}  -> underscore-joined recognized person names, or 'unknown'
-      {camera} -> camera model, or omitted if unavailable
-      {orig}   -> original filename stem
-      {ext}    -> original extension, including the dot
+      {date}    -> YYYY-MM-DD, or 'unknown-date'
+      {time}    -> HHMMSS
+      {names}   -> underscore-joined recognized person names, or 'unknown'
+      {camera}  -> camera model, or omitted if unavailable
+      {orig}    -> original filename stem
+      {ext}     -> original extension, including the dot
+      {counter} -> zero-padded sequential number (e.g. "IMG_{counter}{ext}" -> IMG_0007.jpg),
+                   assigned in date-taken order by propose_reorganization()
     """
     dt = _parse_date(photo_row["date_taken"])
     tokens = {
@@ -91,6 +93,7 @@ def rename_pattern(photo_row, person_names, pattern: str = "{date}_{names}{ext}"
         "camera": (photo_row["camera_model"] or "").replace(" ", "-") or "camera",
         "orig": Path(photo_row["filename"]).stem,
         "ext": Path(photo_row["filename"]).suffix,
+        "counter": counter,
     }
     return pattern.format(**tokens)
 
@@ -118,15 +121,21 @@ def propose_reorganization(db: LibraryDB, drive_id: int, scheme: str = "by_date_
     (possibly user-edited) result of this to actually move files.
     """
     scheme_fn = SCHEMES[scheme]
-    photos = db.conn.execute("SELECT * FROM photos WHERE drive_id = ?", (drive_id,)).fetchall()
+    # ordered by date_taken so {counter} in rename_pattern is chronological and
+    # stable across re-runs (re-proposing on an already-renamed drive reproduces
+    # the same numbers, so already-correct names are naturally filtered out below)
+    photos = db.conn.execute(
+        "SELECT * FROM photos WHERE drive_id = ? ORDER BY date_taken, id", (drive_id,)
+    ).fetchall()
 
     proposals = []
-    for photo in photos:
+    for idx, photo in enumerate(photos, start=1):
         person_names = get_person_names_for_photo(db, photo["id"])
         object_labels = get_object_labels_for_photo(db, photo["id"])
         new_folder_path = scheme_fn(photo, person_names, object_labels)
         if rename:
-            new_filename = rename_pattern(photo, person_names, rename_pattern_str)
+            counter = f"{idx:04d}"
+            new_filename = rename_pattern(photo, person_names, rename_pattern_str, counter)
             new_relative_path = new_folder_path.parent / new_filename
         else:
             new_relative_path = new_folder_path

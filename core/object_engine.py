@@ -18,10 +18,11 @@ import numpy as np
 import onnxruntime as ort
 from pathlib import Path
 
-from .paths import APP_DIR
+from .paths import MODELS_DIR
 from .exif_utils import load_image_bgr
+from .face_engine import _gpu_available
 
-DEFAULT_MODEL_PATH = APP_DIR / "data" / "models" / "yolov8n.onnx"
+DEFAULT_MODEL_PATH = MODELS_DIR / "yolov8n.onnx"
 INPUT_SIZE = 640
 
 # Standard 80 COCO class names, in the order YOLOv8 was trained on.
@@ -52,7 +53,8 @@ class ObjectEngine:
                 "`yolo export model=yolov8n.pt format=onnx imgsz=640`, and move "
                 f"the resulting yolov8n.onnx to {self.model_path}."
             )
-        self.session = ort.InferenceSession(str(self.model_path), providers=["CPUExecutionProvider"])
+        providers = ["CUDAExecutionProvider", "CPUExecutionProvider"] if _gpu_available() else ["CPUExecutionProvider"]
+        self.session = ort.InferenceSession(str(self.model_path), providers=providers)
         self.input_name = self.session.get_inputs()[0].name
 
     def _letterbox(self, img: np.ndarray):

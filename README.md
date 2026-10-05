@@ -125,7 +125,7 @@ before being handed to you.
 ## Milestone 6: Update manager (current)
 
 - **Auto-update checks**: the tray app checks GitHub Releases for
-  `abhimokkapati/photo-manager` a few seconds after launch (silently — a
+  `AbhiMokkapati/photo-library-manager` a few seconds after launch (silently — a
   failed/offline check never bugs you). If a newer version is published,
   a dialog offers to download and run the new installer, then quits the
   running app so the installer can overwrite its files. Toggle this from

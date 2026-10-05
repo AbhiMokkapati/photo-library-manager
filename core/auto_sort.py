@@ -10,6 +10,7 @@ accidental duplication across drives; cross-drive moves are flagged
 separately since they involve a slower copy+verify+delete.
 """
 
+import re
 import shutil
 from pathlib import Path
 from datetime import datetime
@@ -31,7 +32,7 @@ def scheme_by_person(photo_row, person_names, object_labels) -> Path:
     """ People/Mom/IMG_1234.jpg  — photos with multiple people go under the first name;
     photos with no recognized/named person fall into 'Unsorted'. """
     if person_names:
-        folder = f"People/{person_names[0]}"
+        folder = f"People/{_safe_part(person_names[0])}"
     else:
         folder = "Unsorted/No Recognized Person"
     return Path(folder) / photo_row["filename"]
@@ -42,7 +43,7 @@ def scheme_by_date_and_person(photo_row, person_names, object_labels) -> Path:
     dt = _parse_date(photo_row["date_taken"])
     date_part = f"{dt.year}/{dt.strftime('%Y-%m-%d')}" if dt else "Unsorted/No Date"
     if person_names:
-        date_part += " - " + ", ".join(person_names[:3])
+        date_part += " - " + ", ".join(_safe_part(n) for n in person_names[:3])
     return Path(date_part) / photo_row["filename"]
 
 
@@ -50,7 +51,7 @@ def scheme_by_object(photo_row, person_names, object_labels) -> Path:
     """ Objects/Dog/IMG_1234.jpg — filed under the highest-confidence detected
     object; photos with nothing detected fall into 'Unsorted'. """
     if object_labels:
-        folder = f"Objects/{object_labels[0].title()}"
+        folder = f"Objects/{_safe_part(object_labels[0].title())}"
     else:
         folder = "Unsorted/No Object Detected"
     return Path(folder) / photo_row["filename"]
@@ -62,6 +63,22 @@ SCHEMES = {
     "by_date_and_person": scheme_by_date_and_person,
     "by_object": scheme_by_object,
 }
+
+
+_BAD_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def _safe_part(name: str) -> str:
+    """Make a person/object name safe to use as one path component: no
+    separators, reserved characters, or '..' that could escape the folder."""
+    cleaned = _BAD_CHARS.sub("_", str(name)).strip(" .")
+    return cleaned or "_"
+
+
+def _safe_relative(path_str: str) -> Path:
+    """Sanitize every component of a proposed relative path."""
+    parts = [p for p in re.split(r"[\\/]+", path_str) if p not in ("", ".")]
+    return Path(*[_safe_part(p) for p in parts]) if parts else Path("_")
 
 
 def _parse_date(date_str):
@@ -89,13 +106,16 @@ def rename_pattern(photo_row, person_names, pattern: str = "{date}_{names}{ext}"
     tokens = {
         "date": dt.strftime("%Y-%m-%d") if dt else "unknown-date",
         "time": dt.strftime("%H%M%S") if dt else "000000",
-        "names": "_".join(person_names) if person_names else "unknown",
+        "names": "_".join(_safe_part(n) for n in person_names) if person_names else "unknown",
         "camera": (photo_row["camera_model"] or "").replace(" ", "-") or "camera",
         "orig": Path(photo_row["filename"]).stem,
         "ext": Path(photo_row["filename"]).suffix,
         "counter": counter,
     }
-    return pattern.format(**tokens)
+    # format_map on a plain dict: attribute/index access in the pattern
+    # (e.g. "{date.__class__}") is not possible since values are plain strings
+    # — but a result with path separators must not become subfolders.
+    return _safe_part(pattern.format(**{k: str(v) for k, v in tokens.items()}))
 
 
 def get_person_names_for_photo(db: LibraryDB, photo_id: int):
@@ -160,7 +180,12 @@ def apply_reorganization(db: LibraryDB, drive_root: Path, proposals: list, dry_r
 
     for p in proposals:
         src = drive_root / p["current_relative_path"]
-        dst = drive_root / p["proposed_relative_path"]
+        dst = drive_root / _safe_relative(p["proposed_relative_path"])
+        # never let a (possibly hand-edited) proposal move files outside the drive root
+        root_resolved = drive_root.resolve()
+        if not (src.resolve().is_relative_to(root_resolved) and dst.resolve().is_relative_to(root_resolved)):
+            errors.append(f"path escapes drive root, skipped: {p['proposed_relative_path']}")
+            continue
 
         if src == dst:
             skipped += 1
@@ -181,7 +206,7 @@ def apply_reorganization(db: LibraryDB, drive_root: Path, proposals: list, dry_r
         shutil.move(str(src), str(dst))
         db.conn.execute(
             "UPDATE photos SET relative_path=?, filename=? WHERE id=?",
-            (p["proposed_relative_path"], dst.name, p["photo_id"]),
+            (str(dst.relative_to(drive_root)), dst.name, p["photo_id"]),
         )
         # commit immediately after each successful move, not once at the end —
         # otherwise a crash partway through a large batch leaves files already

@@ -9,6 +9,7 @@ thread (see gui/update_check_worker.py) — never call them directly from a
 Qt slot on the main thread.
 """
 
+import hashlib
 import json
 import tempfile
 import urllib.error
@@ -16,10 +17,11 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from core.version import __version__
 
-GITHUB_REPO = "abhimokkapati/photo-manager"
+GITHUB_REPO = "AbhiMokkapati/photo-library-manager"
 _API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
 _REQUEST_TIMEOUT = 10
 _USER_AGENT = "PhotoLibraryManager-UpdateChecker"
@@ -31,6 +33,19 @@ class UpdateInfo:
     download_url: str
     release_notes: str
     asset_name: str
+    sha256: str = ""
+
+# Release assets are served from these hosts only; anything else (e.g. a
+# tampered API response pointing elsewhere) is refused.
+_ALLOWED_DOWNLOAD_HOSTS = ("github.com", "githubusercontent.com")
+
+
+def _is_trusted_url(url: str) -> bool:
+    parts = urlparse(url)
+    host = (parts.hostname or "").lower()
+    return parts.scheme == "https" and any(
+        host == h or host.endswith("." + h) for h in _ALLOWED_DOWNLOAD_HOSTS
+    )
 
 
 def _parse_version(v: str) -> tuple:
@@ -71,11 +86,20 @@ def check_for_update(current_version: str = __version__) -> Optional[UpdateInfo]
     if asset is None:
         return None
 
+    # GitHub publishes a "sha256:<hex>" digest for each release asset. Require
+    # it so a corrupted or swapped download is never executed.
+    digest = str(asset.get("digest") or "")
+    sha256 = digest[len("sha256:"):].lower() if digest.startswith("sha256:") else ""
+    url = asset.get("browser_download_url", "")
+    if len(sha256) != 64 or not _is_trusted_url(url):
+        return None
+
     return UpdateInfo(
         version=tag.lstrip("vV"),
-        download_url=asset["browser_download_url"],
+        download_url=url,
         release_notes=(data.get("body") or "").strip(),
-        asset_name=asset["name"],
+        asset_name=Path(asset["name"]).name,
+        sha256=sha256,
     )
 
 
@@ -87,7 +111,12 @@ def download_installer(info: UpdateInfo, on_progress=None) -> Path:
     Content-Length). Returns the path to the downloaded installer in a temp
     directory; the caller is responsible for launching it.
     """
-    dest = Path(tempfile.gettempdir()) / info.asset_name
+    if not _is_trusted_url(info.download_url) or not info.sha256:
+        raise ValueError("refusing to download from an untrusted URL or without a checksum")
+    # private per-download directory: a fixed, predictable path in the shared
+    # temp dir could be pre-planted or swapped by another local process
+    dest = Path(tempfile.mkdtemp(prefix="plm_update_")) / Path(info.asset_name).name
+    digest = hashlib.sha256()
     req = urllib.request.Request(info.download_url, headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=_REQUEST_TIMEOUT) as resp:
         total = int(resp.headers.get("Content-Length", 0))
@@ -95,7 +124,11 @@ def download_installer(info: UpdateInfo, on_progress=None) -> Path:
         with open(dest, "wb") as f:
             while chunk := resp.read(65536):
                 f.write(chunk)
+                digest.update(chunk)
                 read += len(chunk)
                 if on_progress:
                     on_progress(read, total)
+    if digest.hexdigest() != info.sha256.lower():
+        dest.unlink(missing_ok=True)
+        raise ValueError("downloaded installer failed its SHA-256 check")
     return dest

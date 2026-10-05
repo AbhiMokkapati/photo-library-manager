@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtCore import Qt, QSize, QTimer
+from .style import TEXT_SECONDARY
 
 DEFAULT_THUMB_SIZE = 160
 MIN_THUMB_SIZE = 80
@@ -44,7 +45,7 @@ class PhotoPreviewDialog(QDialog):
         ]
         info_label = QLabel("\n".join(info_lines))
         info_label.setObjectName("sectionLabel")
-        info_label.setStyleSheet("color: #98989d; font-weight: 400; letter-spacing: 0;")
+        info_label.setStyleSheet(f"color: {TEXT_SECONDARY}; font-weight: 400; letter-spacing: 0;")
         layout.addWidget(info_label)
 
         close_btn = QPushButton("Close")
@@ -167,7 +168,10 @@ class LibraryView(QWidget):
 
         query += " ORDER BY date_taken DESC"
         rows = db.conn.execute(query, params).fetchall()
-        self.status_label.setText(f"{len(rows)} photos")
+        self.status_label.setText(
+            f"{len(rows)} photos" if rows or not (search_text or person_id is not None or object_label is not None)
+            else "No photos match these filters. Clear the search or filters to see everything."
+        )
         self._rows = rows
         self._load_batch(0)
 

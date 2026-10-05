@@ -6,7 +6,7 @@ people you name once, lets you filter your library by person or object,
 proposes a folder/rename structure it only applies after you approve it, and
 can auto-index your external photo drive the moment you plug it in.
 
-## Milestone 3: Tray app + auto-index on drive connect (current)
+## Milestone 3: Tray app + auto-index on drive connect
 
 **This is the way to actually use the app day to day:**
 ```
@@ -66,7 +66,7 @@ background worker, face detection + clustering, naming a person, filtering
 the library by that person, and previewing a sort — all confirmed working
 before being handed to you.
 
-## Milestone 4: Object recognition + packaging (current)
+## Milestone 4: Object recognition + packaging
 
 - **Object detection**: every indexed photo is also run through a YOLOv8n
   object detector (`core/object_engine.py`), tagging common objects/scenes
@@ -90,7 +90,7 @@ before being handed to you.
   not a single file), then drop a shortcut to the `.exe` into `shell:startup`
   for it to run automatically at login — no Python install needed anymore.
 
-## Milestone 5: Dashboard, duplicates, IMG_#### renaming, installer (current)
+## Milestone 5: Dashboard, duplicates, IMG_#### renaming, installer
 
 - **Dashboard tab** (now the first tab): library stats at a glance (photos,
   faces, people, objects, duplicate groups) and a list of every drive/folder

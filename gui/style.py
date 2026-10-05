@@ -26,8 +26,8 @@ BG_CARD_HOVER = "#333335"
 BORDER = "#3a3a3c"
 BORDER_SUBTLE = "#333335"
 TEXT = "#f5f5f7"
-TEXT_SECONDARY = "#98989d"
-TEXT_TERTIARY = "#6e6e73"
+TEXT_SECONDARY = "#aeaeb2"
+TEXT_TERTIARY = "#8e8e93"  # >= 4.5:1 on BG for placeholder text
 ACCENT = "#0a84ff"
 ACCENT_HOVER = "#3d9aff"
 ACCENT_PRESSED = "#0a6fd6"
@@ -218,7 +218,7 @@ QLabel#dashboardTitle {{
 
 QLabel#sectionLabel {{
     color: {TEXT_SECONDARY};
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 600;
     letter-spacing: 0.4px;
     padding: 4px 0;
@@ -226,7 +226,7 @@ QLabel#sectionLabel {{
 
 QFrame#statTile {{
     background: {BG_CARD};
-    border: 1px solid {BORDER_SUBTLE};
+    border: 1px solid transparent;
     border-radius: 12px;
     padding: 14px;
     min-width: 120px;
@@ -240,12 +240,12 @@ QLabel#statValue {{
 
 QLabel#statTitle {{
     color: {TEXT_SECONDARY};
-    font-size: 12px;
+    font-size: 13px;
 }}
 
 QFrame#driveRow {{
     background: {BG_CARD};
-    border: 1px solid {BORDER_SUBTLE};
+    border: 1px solid transparent;
     border-radius: 10px;
 }}
 
@@ -269,13 +269,12 @@ QLabel#stackFront {{
 /* --- cards: people / duplicates --- */
 QFrame#personCard, QFrame#duplicateCard {{
     background: {BG_CARD};
-    border: 1px solid {BORDER_SUBTLE};
+    border: 1px solid transparent;
     border-radius: 10px;
     padding: 6px;
 }}
 
 QFrame#personCard:hover, QFrame#duplicateCard:hover {{
-    border-color: {BORDER};
     background: {BG_CARD_HOVER};
 }}
 

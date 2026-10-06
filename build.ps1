@@ -9,7 +9,7 @@
 
 python scripts\make_icon.py
 
-pyinstaller photo_manager.spec --noconfirm
+python -m PyInstaller photo_manager.spec --noconfirm
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host ""

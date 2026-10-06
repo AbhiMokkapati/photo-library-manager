@@ -7,4 +7,4 @@ core/updates_manager.py compares it against the latest GitHub release to
 decide whether an update is available.
 """
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

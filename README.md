@@ -189,3 +189,7 @@ python run_index.py "E:\Photos\2024" --cluster --propose-sort by_date_and_person
 
 - `core/face_engine.py`: `_MIN_DET_SCORE` (currently 0.55) — raise if you're getting false-positive face detections, lower if faces are being missed
 - `core/clustering.py`: `CORE_COSINE` (0.60, DBSCAN neighbour similarity), `DEFAULT_MIN_SAMPLES` (3), `MATCH_THRESHOLD` (0.50) / `MATCH_MARGIN` (0.05) for attaching leftovers, `AUTO_CONFIRM_THRESHOLD` (0.65, below this an assignment goes to the review queue), and `MIN_QUALITY_DET_SCORE` / `MIN_QUALITY_FACE_PX` (faces below these never form clusters, only attach to existing ones). Raise `CORE_COSINE` for fewer false merges, lower it for less splitting. `suggest_person_merges()` lists people that are probably the same person.
+
+## License
+
+MIT, see [LICENSE](LICENSE). Note: the InsightFace `buffalo_l` face models the app downloads are licensed separately, for non-commercial research use only.

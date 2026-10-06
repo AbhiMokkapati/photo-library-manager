@@ -23,6 +23,11 @@ from .face_engine import FaceEngine
 from .object_engine import ObjectEngine
 from .clustering import match_new_face_to_person
 
+# folders that exist on drives but aren't the user's library: deleted photos in the
+# Recycle Bin would otherwise be indexed, shown, and offered up for reorganizing
+_SKIP_DIRS = {"$recycle.bin", "system volume information"}
+_CENTROID_REFRESH_EVERY = 50   # new faces between recomputing person centroids during a run
+
 logger = logging.getLogger(__name__)
 
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".bmp", ".tiff", ".webp"} | RAW_EXTENSIONS
@@ -84,11 +89,19 @@ class Indexer:
         self.object_engine = object_engine
         self.detect_objects = detect_objects
         self.progress_callback = progress_callback  # optional: fn(current, total, path)
+        self._centroids = None
+        self._faces_since_refresh = 0
 
     def index_drive(self, root_path: Path, drive_id: int):
         """Walk root_path recursively and index every supported image found."""
         root_path = Path(root_path)
-        all_files = [p for p in root_path.rglob("*") if p.suffix.lower() in SUPPORTED_EXTENSIONS]
+        all_files = [
+            p for p in root_path.rglob("*")
+            if p.suffix.lower() in SUPPORTED_EXTENSIONS and p.is_file()
+            and not any(part.lower() in _SKIP_DIRS for part in p.relative_to(root_path).parts)
+        ]
+        self._centroids = None
+        self._faces_since_refresh = 0
         total = len(all_files)
 
         errors = []
@@ -157,14 +170,19 @@ class Indexer:
             faces = self.face_engine.detect_and_embed(file_path, orig_size=(meta["width"], meta["height"]))
             for f in faces:
                 face_id = self.db.insert_face(canonical["id"], f["bbox"], f["embedding"], f["det_score"])
+                if self._centroids is None or self._faces_since_refresh >= _CENTROID_REFRESH_EVERY:
+                    self._centroids = {pid: c for pid, (c, _) in self.db.person_centroids().items()}
+                    self._faces_since_refresh = 0
+                self._faces_since_refresh += 1
                 # fast path: if this face clearly matches an existing person, assign it
                 # now (still unconfirmed — shows up in "Needs confirmation", a one-click
                 # review, instead of "Unassigned"). Full cluster_all_unassigned() still
                 # runs after the batch for anything this doesn't confidently match.
-                match_new_face_to_person(self.db, face_id, f["embedding"])
+                match_new_face_to_person(self.db, face_id, f["embedding"], centroids=self._centroids)
 
         if self.detect_objects and self.object_engine:
             objects = self.object_engine.detect(file_path)
+            self.db.clear_objects(canonical["id"])
             for o in objects:
                 self.db.insert_object(canonical["id"], o["label"], o["confidence"], o["bbox"])
 

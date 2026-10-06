@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QPixmap
 from PySide6.QtCore import Qt, Signal, QSize
 
+from core.clustering import suggest_person_merges
 from .review_faces_dialog import ReviewFacesDialog
 
 CARD_THUMB_SIZE = 84
@@ -184,12 +185,105 @@ class PersonDetailDialog(QDialog):
         )
         if confirm != QMessageBox.Yes:
             return
-        db = self.get_db()
-        db.conn.execute("UPDATE faces SET person_id=? WHERE person_id=?", (target_id, self.person_id))
-        db.conn.execute("DELETE FROM people WHERE id=?", (self.person_id,))
-        db.conn.commit()
+        self.get_db().merge_people(self.person_id, target_id)
         self.renamed = True
         self.accept()
+
+
+def _person_thumb_path(db, person):
+    if not person["representative_face_id"]:
+        return None
+    row = db.conn.execute(
+        "SELECT photos.thumbnail_path FROM faces JOIN photos ON photos.id = faces.photo_id WHERE faces.id=?",
+        (person["representative_face_id"],)).fetchone()
+    return row["thumbnail_path"] if row else None
+
+
+def _person_label(person):
+    return person["name"] or f"Unnamed #{person['id']}"
+
+
+class _MergeSuggestionRow(QFrame):
+    resolved = Signal()
+
+    def __init__(self, db, a, b, score, parent=None):
+        super().__init__(parent)
+        self.setObjectName("personCard")
+        self.setFrameShape(QFrame.StyledPanel)
+        self.db, self.a, self.b = db, a, b
+
+        layout = QHBoxLayout(self)
+        for person in (a, b):
+            col = QVBoxLayout()
+            count = db.conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id=?", (person["id"],)).fetchone()["c"]
+            col.addWidget(StackThumbnail(_person_thumb_path(db, person), count), alignment=Qt.AlignHCenter)
+            col.addWidget(QLabel(f"{_person_label(person)} ({count})"), alignment=Qt.AlignHCenter)
+            layout.addLayout(col)
+        layout.addWidget(QLabel(f"{round(score * 100)}% similar"), 1, Qt.AlignCenter)
+
+        merge_btn = QPushButton("Same person - merge")
+        merge_btn.clicked.connect(self._merge)
+        layout.addWidget(merge_btn)
+        keep_btn = QPushButton("Different people")
+        keep_btn.clicked.connect(self._dismiss)
+        layout.addWidget(keep_btn)
+
+    def _merge(self):
+        # fold the smaller group into the larger; a named person always wins
+        def size(p):
+            return self.db.conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id=?", (p["id"],)).fetchone()["c"]
+        keep, drop = sorted((self.a, self.b), key=lambda p: (p["name"] is None, -size(p)))
+        self.db.merge_people(drop["id"], keep["id"])
+        self.resolved.emit()
+
+    def _dismiss(self):
+        self.db.dismiss_merge(self.a["id"], self.b["id"])
+        self.resolved.emit()
+
+
+class MergeSuggestionsDialog(QDialog):
+    """Pairs of people whose faces look like the same person split into two groups."""
+
+    def __init__(self, get_db, parent=None):
+        super().__init__(parent)
+        self.get_db = get_db
+        self.changed = False
+        self.setWindowTitle("Merge suggestions")
+        self.resize(640, 520)
+        outer = QVBoxLayout(self)
+        self.summary = QLabel()
+        self.summary.setObjectName("sectionLabel")
+        outer.addWidget(self.summary)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        self.container = QWidget()
+        self.rows = QVBoxLayout(self.container)
+        self.rows.setAlignment(Qt.AlignTop)
+        scroll.setWidget(self.container)
+        outer.addWidget(scroll, 1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        outer.addWidget(close_btn)
+        self._reload()
+
+    def _reload(self):
+        while self.rows.count():
+            item = self.rows.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        db = self.get_db()
+        suggestions = suggest_person_merges(db)
+        self.summary.setText(
+            f"{len(suggestions)} possible duplicate{'s' if len(suggestions) != 1 else ''}" if suggestions
+            else "No merge suggestions right now.")
+        for a_id, b_id, score in suggestions:
+            row = _MergeSuggestionRow(db, db.get_person(a_id), db.get_person(b_id), score)
+            row.resolved.connect(self._on_resolved)
+            self.rows.addWidget(row)
+
+    def _on_resolved(self):
+        self.changed = True
+        self._reload()   # a merge changes centroids, so recompute the remaining pairs
 
 
 class PeopleView(QWidget):
@@ -208,6 +302,9 @@ class PeopleView(QWidget):
         self.review_btn = QPushButton("Review faces")
         self.review_btn.clicked.connect(self._open_review)
         header.addWidget(self.review_btn)
+        self.merge_btn = QPushButton("Merge suggestions")
+        self.merge_btn.clicked.connect(self._open_merge_suggestions)
+        header.addWidget(self.merge_btn)
         refresh_btn = QPushButton("Refresh")
         refresh_btn.clicked.connect(self.refresh)
         header.addWidget(refresh_btn)
@@ -236,6 +333,9 @@ class PeopleView(QWidget):
         total_review = counts["unassigned"] + counts["unconfirmed"]
         self.review_btn.setText(f"Review faces ({total_review})" if total_review else "Review faces")
 
+        merge_count = len(suggest_person_merges(db))
+        self.merge_btn.setText(f"Merge suggestions ({merge_count})" if merge_count else "Merge suggestions")
+
         people = db.list_people()
         columns = 8
         for i, person in enumerate(people):
@@ -257,6 +357,11 @@ class PeopleView(QWidget):
             card = PersonCard(person, face_count, thumb_path)
             card.opened.connect(self._open_person)
             self.grid_layout.addWidget(card, i // columns, i % columns)
+
+    def _open_merge_suggestions(self):
+        dlg = MergeSuggestionsDialog(self.get_db, self)
+        dlg.exec()
+        self.refresh()
 
     def _open_review(self):
         dlg = ReviewFacesDialog(self.get_db, self)

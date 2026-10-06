@@ -42,6 +42,8 @@ class MainWindow(QMainWindow):
         self.current_drive_root = None
         self._index_worker = None
         self._cluster_worker = None
+        self._pending_index = None        # (root, drive_id, faces, objects) requested mid-run
+        self._recluster_requested = False
 
         # --- toolbar ---
         toolbar = QToolBar("Main")
@@ -216,6 +218,9 @@ class MainWindow(QMainWindow):
         file dialog in the latter case.
         """
         if self._index_worker and self._index_worker.isRunning():
+            # remember it (latest request wins) and run it when the current pass ends,
+            # instead of only saying so and silently dropping it
+            self._pending_index = (root, drive_id, detect_faces, detect_objects)
             self.status_label.setText("Indexing already in progress; will index this drive next.")
             return
 
@@ -246,6 +251,7 @@ class MainWindow(QMainWindow):
 
     def _on_index_finished(self, result):
         self.progress_bar.setVisible(False)
+        self._index_worker = None
         errors = result.get("errors") or []
         if errors:
             self.status_label.setText(
@@ -261,18 +267,28 @@ class MainWindow(QMainWindow):
         else:
             self.status_label.setText(f"Indexed {result['scanned']} files.")
         # re-open the main-thread DB connection's view of the data and refresh UI
-        self.db = LibraryDB(DEFAULT_DB_PATH)
-        self.library_view.get_db = lambda: self.db
-        self.dashboard_view.get_db = lambda: self.db
-        self.duplicates_view.get_db = lambda: self.db
+        self._reopen_db()
         self.library_view.refresh()
         self.library_view.refresh_person_filter()
         self.dashboard_view.refresh()
         self.duplicates_view.refresh()
         self._refresh_drive_combo()
-        self.run_clustering()
+        if self.settings.get("auto_cluster_after_index", True):
+            self.run_clustering()
+        if self._pending_index:
+            root, drive_id, faces, objects = self._pending_index
+            self._pending_index = None
+            self.start_indexing(root, drive_id, faces, objects)
+
+    def _reopen_db(self):
+        """Fresh main-thread connection (sees what the worker threads committed);
+        the old one is closed instead of leaked. Views read self.db lazily."""
+        old, self.db = self.db, LibraryDB(DEFAULT_DB_PATH)
+        old.close()
 
     def _on_index_failed(self, error_message):
+        self._index_worker = None
+        self._pending_index = None
         self.progress_bar.setVisible(False)
         self.status_label.setText("Indexing failed.")
         QMessageBox.critical(self, "Indexing error", error_message)
@@ -282,24 +298,33 @@ class MainWindow(QMainWindow):
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR)))
 
     def run_clustering(self):
+        if self._cluster_worker and self._cluster_worker.isRunning():
+            # two passes at once would race each other creating people; run once more after
+            self._recluster_requested = True
+            return
         self.status_label.setText("Clustering faces...")
         self._cluster_worker = ClusterWorker(db_path=DEFAULT_DB_PATH)
         self._cluster_worker.finished_ok.connect(self._on_cluster_finished)
-        self._cluster_worker.failed.connect(lambda e: self.status_label.setText(f"Clustering failed: {e}"))
+        self._cluster_worker.failed.connect(self._on_cluster_failed)
         self._cluster_worker.start()
+
+    def _on_cluster_failed(self, error):
+        self.status_label.setText(f"Clustering failed: {error}")
+        self._cluster_worker = None
+        self._recluster_requested = False
 
     def _on_cluster_finished(self, result):
         self.status_label.setText(
             f"Clustering done: {result['clusters_created']} groups, {result['faces_clustered']} faces."
         )
-        self.db = LibraryDB(DEFAULT_DB_PATH)
-        self.library_view.get_db = lambda: self.db
-        self.people_view.get_db = lambda: self.db
-        self.dashboard_view.get_db = lambda: self.db
-        self.duplicates_view.get_db = lambda: self.db
+        self._cluster_worker = None
+        self._reopen_db()
         self.people_view.refresh()
         self.library_view.refresh_person_filter()
         self.dashboard_view.refresh()
+        if self._recluster_requested:
+            self._recluster_requested = False
+            self.run_clustering()
 
     def closeEvent(self, event):
         if self.hide_on_close:

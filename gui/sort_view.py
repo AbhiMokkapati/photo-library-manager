@@ -85,11 +85,21 @@ class SortView(QWidget):
         drive_id, _root = drive_info
 
         scheme = self.scheme_combo.currentData()
-        proposals = propose_reorganization(
-            db, drive_id, scheme=scheme,
-            rename=self.rename_checkbox.isChecked(),
-            rename_pattern_str=self.rename_pattern.text(),
-        )
+        try:
+            proposals = propose_reorganization(
+                db, drive_id, scheme=scheme,
+                rename=self.rename_checkbox.isChecked(),
+                rename_pattern_str=self.rename_pattern.text(),
+            )
+        except (KeyError, ValueError, IndexError) as e:
+            # a typo'd token like {dat} or an unclosed brace used to raise inside the Qt slot
+            # and leave the user with a button that silently does nothing
+            QMessageBox.warning(
+                self, "Invalid rename pattern",
+                f"Couldn't use the pattern '{self.rename_pattern.text()}' ({type(e).__name__}: {e}).\n\n"
+                "Valid tokens: {date} {time} {names} {camera} {orig} {ext} {counter}"
+            )
+            return
         # only show rows where something actually changes
         self._proposals = [p for p in proposals if p["current_relative_path"] != p["proposed_relative_path"]]
 

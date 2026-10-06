@@ -119,10 +119,14 @@ def rename_pattern(photo_row, person_names, pattern: str = "{date}_{names}{ext}"
 
 
 def get_person_names_for_photo(db: LibraryDB, photo_id: int):
+    """Names of people in this photo. Faces the algorithm itself flagged as uncertain
+    (needs_review) don't count: these names decide where files get moved/renamed on
+    disk, so only confirmed or high-confidence assignments may drive that."""
     rows = db.conn.execute("""
         SELECT DISTINCT p.name FROM faces f
         JOIN people p ON f.person_id = p.id
         WHERE f.photo_id = ? AND p.name IS NOT NULL
+          AND (f.confirmed = 1 OR f.needs_review = 0)
         ORDER BY p.name
     """, (photo_id,)).fetchall()
     return [r["name"] for r in rows]

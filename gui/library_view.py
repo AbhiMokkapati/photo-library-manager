@@ -59,6 +59,7 @@ class LibraryView(QWidget):
         super().__init__(parent)
         self.get_db = get_db  # callable returning the current LibraryDB instance
         self._rows = []
+        self._load_generation = 0
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 16, 20, 16)
@@ -173,11 +174,14 @@ class LibraryView(QWidget):
             else "No photos match these filters. Clear the search or filters to see everything."
         )
         self._rows = rows
-        self._load_batch(0)
+        self._load_generation += 1   # orphans any still-pending batch from an earlier refresh
+        self._load_batch(0, self._load_generation)
 
-    def _load_batch(self, start_index):
+    def _load_batch(self, start_index, generation):
         """Adds thumbnails in chunks via a zero-delay timer so the event loop
         can breathe on very large libraries instead of freezing on load."""
+        if generation != self._load_generation:
+            return   # a newer refresh replaced self._rows; continuing would add duplicates
         end_index = min(start_index + BATCH_SIZE, len(self._rows))
         for row in self._rows[start_index:end_index]:
             item = QListWidgetItem(row["filename"])
@@ -186,7 +190,7 @@ class LibraryView(QWidget):
             item.setData(Qt.UserRole, row["id"])
             self.grid.addItem(item)
         if end_index < len(self._rows):
-            QTimer.singleShot(0, lambda: self._load_batch(end_index))
+            QTimer.singleShot(0, lambda: self._load_batch(end_index, generation))
 
     def _open_preview(self, item):
         db = self.get_db()

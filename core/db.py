@@ -18,6 +18,8 @@ from contextlib import contextmanager
 
 from .paths import DB_PATH as DEFAULT_DB_PATH
 
+FACE_DUPLICATE_IOU = 0.5   # two boxes in one photo overlapping more than this are the same face
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS drives (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +110,14 @@ CREATE TABLE IF NOT EXISTS photo_locations (
     UNIQUE(drive_id, relative_path)
 );
 
+-- pairs of people the user said are NOT the same person, so the merge
+-- suggestions don't keep offering them (always stored with person_a < person_b)
+CREATE TABLE IF NOT EXISTS merge_dismissals (
+    person_a INTEGER NOT NULL,
+    person_b INTEGER NOT NULL,
+    PRIMARY KEY (person_a, person_b)
+);
+
 CREATE INDEX IF NOT EXISTS idx_photos_date ON photos(date_taken);
 CREATE INDEX IF NOT EXISTS idx_faces_person ON faces(person_id);
 CREATE INDEX IF NOT EXISTS idx_faces_photo ON faces(photo_id);
@@ -136,6 +146,24 @@ class LibraryDB:
         cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(photos)")}
         if "detection_checked" not in cols:
             self.conn.execute("ALTER TABLE photos ADD COLUMN detection_checked INTEGER DEFAULT 0")
+            self.conn.commit()
+
+        face_cols = {row["name"] for row in self.conn.execute("PRAGMA table_info(faces)")}
+        if "needs_review" not in face_cols:
+            # needs_review = 1 only for auto-assignments the algorithm is NOT sure
+            # about. Everything else auto-assigned is trusted but stays re-clusterable
+            # (confirmed stays 0), unlike user-confirmed faces. Pre-existing
+            # unconfirmed assignments are carried over as "needs review".
+            self.conn.execute("ALTER TABLE faces ADD COLUMN needs_review INTEGER DEFAULT 0")
+            self.conn.execute("UPDATE faces SET needs_review=1 WHERE person_id IS NOT NULL AND confirmed=0")
+            self.conn.commit()
+        if "match_score" not in face_cols:
+            self.conn.execute("ALTER TABLE faces ADD COLUMN match_score REAL")
+            self.conn.commit()
+        if self.conn.execute("PRAGMA user_version").fetchone()[0] < 1:
+            # insert_face() now prevents duplicates, so this legacy cleanup is one-time
+            self.dedupe_faces()
+            self.conn.execute("PRAGMA user_version = 1")
             self.conn.commit()
 
     def close(self):
@@ -220,6 +248,12 @@ class LibraryDB:
         """
         existing = self.get_photo_by_hash(content_hash)
         if existing is None:
+            in_place = self.get_photo_by_location(drive_id, relative_path)
+            if in_place is not None:
+                # the file at this path was edited/replaced: its bytes (hash) changed but
+                # the path is still taken (UNIQUE(drive_id, relative_path)), so a plain
+                # INSERT would fail forever. Update the row to the new content instead.
+                return self._replace_photo_content(in_place["id"], content_hash, **fields)
             insert_fields = {
                 "content_hash": content_hash, "drive_id": drive_id,
                 "relative_path": relative_path, **fields,
@@ -244,6 +278,19 @@ class LibraryDB:
         )
         self.conn.commit()
         return existing["id"]
+
+    def _replace_photo_content(self, photo_id: int, content_hash: str, **fields) -> int:
+        """Re-points an existing photo row at new file content. Detection results of
+        the old content are stale: unconfirmed faces and all objects are dropped and
+        detection is re-run; user-confirmed faces are kept (a re-detected face at the
+        same spot is merged into them by insert_face's overlap check)."""
+        self.conn.execute("DELETE FROM faces WHERE photo_id=? AND confirmed=0", (photo_id,))
+        self.conn.execute("DELETE FROM objects WHERE photo_id=?", (photo_id,))
+        fields.update(content_hash=content_hash, detection_checked=0, id=photo_id)
+        set_clause = ", ".join(f"{k}=:{k}" for k in fields if k != "id")
+        self.conn.execute(f"UPDATE photos SET {set_clause} WHERE id=:id", fields)
+        self.conn.commit()
+        return photo_id
 
     # ---------- duplicate copies ----------
     def list_duplicate_groups(self):
@@ -290,13 +337,99 @@ class LibraryDB:
         self.conn.commit()
 
     # ---------- faces ----------
+    @staticmethod
+    def _bbox_iou(a, b) -> float:
+        x1, y1, x2, y2 = max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3])
+        inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+        union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+        return inter / union if union > 0 else 0.0
+
     def insert_face(self, photo_id: int, bbox, embedding: np.ndarray, det_score: float) -> int:
+        """Inserts a detected face, unless this photo already has a face at
+        (essentially) the same location: re-running detection on a photo (a retry
+        after a crash, a forced re-index) must not stack duplicate rows, which
+        would otherwise look like extra 'similar faces' to clustering. Returns the
+        existing face's id in that case."""
+        new_box = list(map(float, bbox))
+        for row in self.conn.execute("SELECT id, bbox FROM faces WHERE photo_id=?", (photo_id,)).fetchall():
+            if self._bbox_iou(new_box, json.loads(row["bbox"])) > FACE_DUPLICATE_IOU:
+                return row["id"]
         cur = self.conn.execute(
             "INSERT INTO faces (photo_id, bbox, embedding, det_score) VALUES (?, ?, ?, ?)",
             (photo_id, json.dumps(list(map(float, bbox))), embedding.astype(np.float32).tobytes(), float(det_score)),
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def dedupe_faces(self) -> int:
+        """Idempotent cleanup of duplicate face rows (same photo, heavily
+        overlapping bbox) left behind by earlier versions. Keeps the row that is
+        user-confirmed, else already assigned, else highest detection score."""
+        photo_ids = [r["photo_id"] for r in self.conn.execute(
+            "SELECT photo_id FROM faces GROUP BY photo_id HAVING COUNT(*) > 1").fetchall()]
+        removed = 0
+        for photo_id in photo_ids:
+            rows = self.conn.execute(
+                "SELECT id, bbox, confirmed, person_id, det_score FROM faces WHERE photo_id=?", (photo_id,)
+            ).fetchall()
+            rows = sorted(rows, key=lambda r: (-r["confirmed"], r["person_id"] is None, -(r["det_score"] or 0)))
+            kept = []
+            for r in rows:
+                box = json.loads(r["bbox"])
+                if any(self._bbox_iou(box, kb) > FACE_DUPLICATE_IOU for kb in kept):
+                    self.conn.execute("DELETE FROM faces WHERE id=?", (r["id"],))
+                    removed += 1
+                else:
+                    kept.append(box)
+        if removed:
+            # people whose representative face was just deleted need a new one
+            self.conn.execute(
+                "UPDATE people SET representative_face_id = (SELECT MIN(id) FROM faces WHERE person_id=people.id) "
+                "WHERE representative_face_id IS NOT NULL AND representative_face_id NOT IN (SELECT id FROM faces)")
+            self.conn.commit()
+        return removed
+
+    def person_centroids(self):
+        """{person_id: (unit centroid ndarray, n_faces_used)}. Built from the
+        user-confirmed faces when a person has any (ground truth), otherwise from
+        all of their faces: a mean of many samples is far more robust than any
+        single 'representative' face."""
+        rows = self.conn.execute(
+            "SELECT person_id, confirmed, embedding FROM faces WHERE person_id IS NOT NULL").fetchall()
+        groups = {}
+        for r in rows:
+            groups.setdefault(r["person_id"], []).append((r["confirmed"], np.frombuffer(r["embedding"], dtype=np.float32)))
+        out = {}
+        for pid, items in groups.items():
+            confirmed = [e for c, e in items if c]
+            use = confirmed or [e for _, e in items]
+            c = np.mean(use, axis=0)
+            norm = np.linalg.norm(c)
+            if norm > 0:
+                out[pid] = (c / norm, len(use))
+        return out
+
+    def photo_person_ids(self, photo_id: int, exclude_face_id: int = None) -> set:
+        """People already present in this photo. One person can't appear twice in
+        the same photo, so these are off-limits as a match for another face in it."""
+        rows = self.conn.execute(
+            "SELECT person_id FROM faces WHERE photo_id=? AND person_id IS NOT NULL AND id != ?",
+            (photo_id, exclude_face_id or -1)).fetchall()
+        return {r["person_id"] for r in rows}
+
+    def unconfirmed_face_details(self):
+        """Unconfirmed faces as dicts with the extra fields clustering needs for
+        quality gating and same-photo constraints."""
+        out = []
+        for r in self.conn.execute(
+                "SELECT id, photo_id, person_id, det_score, bbox, embedding FROM faces WHERE confirmed = 0").fetchall():
+            b = json.loads(r["bbox"])
+            out.append({
+                "id": r["id"], "photo_id": r["photo_id"], "person_id": r["person_id"],
+                "det_score": r["det_score"] or 0.0, "size": min(b[2] - b[0], b[3] - b[1]),
+                "embedding": np.frombuffer(r["embedding"], dtype=np.float32),
+            })
+        return out
 
     def unconfirmed_faces_with_embeddings(self):
         """Returns list of (face_id, person_id, embedding_ndarray) for every face
@@ -310,12 +443,14 @@ class LibraryDB:
             out.append((row["id"], row["person_id"], emb))
         return out
 
-    def assign_face_to_person(self, face_id: int, person_id: int, confirmed: bool = False):
+    def assign_face_to_person(self, face_id: int, person_id: int, confirmed: bool = False,
+                              needs_review: bool = False, score: float = None, commit: bool = True):
         self.conn.execute(
-            "UPDATE faces SET person_id=?, confirmed=? WHERE id=?",
-            (person_id, int(confirmed), face_id),
+            "UPDATE faces SET person_id=?, confirmed=?, needs_review=?, match_score=? WHERE id=?",
+            (person_id, int(confirmed), int(needs_review and not confirmed), score, face_id),
         )
-        self.conn.commit()
+        if commit:   # bulk callers pass False and commit once: a commit per face is an fsync per face
+            self.conn.commit()
 
     def list_unassigned_faces(self):
         """Faces the algorithm detected but couldn't confidently cluster
@@ -339,24 +474,25 @@ class LibraryDB:
             "FROM faces "
             "JOIN photos ON photos.id = faces.photo_id "
             "JOIN people ON people.id = faces.person_id "
-            "WHERE faces.person_id IS NOT NULL AND faces.confirmed = 0 "
+            "WHERE faces.person_id IS NOT NULL AND faces.confirmed = 0 AND faces.needs_review = 1 "
             "ORDER BY faces.id DESC"
         ).fetchall()
 
     def confirm_face(self, face_id: int):
-        self.conn.execute("UPDATE faces SET confirmed=1 WHERE id=?", (face_id,))
+        self.conn.execute("UPDATE faces SET confirmed=1, needs_review=0 WHERE id=?", (face_id,))
         self.conn.commit()
 
-    def reject_face_assignment(self, face_id: int):
+    def reject_face_assignment(self, face_id: int, commit: bool = True):
         """Kicks a wrongly-suggested face back into the unassigned pool
         rather than leaving it under the wrong person."""
-        self.conn.execute("UPDATE faces SET person_id=NULL, confirmed=0 WHERE id=?", (face_id,))
-        self.conn.commit()
+        self.conn.execute("UPDATE faces SET person_id=NULL, confirmed=0, needs_review=0, match_score=NULL WHERE id=?", (face_id,))
+        if commit:
+            self.conn.commit()
 
     def review_counts(self):
         unassigned = self.conn.execute("SELECT COUNT(*) c FROM faces WHERE person_id IS NULL").fetchone()["c"]
         unconfirmed = self.conn.execute(
-            "SELECT COUNT(*) c FROM faces WHERE person_id IS NOT NULL AND confirmed = 0"
+            "SELECT COUNT(*) c FROM faces WHERE person_id IS NOT NULL AND confirmed = 0 AND needs_review = 1"
         ).fetchone()["c"]
         return {"unassigned": unassigned, "unconfirmed": unconfirmed}
 
@@ -368,6 +504,12 @@ class LibraryDB:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def clear_objects(self, photo_id: int):
+        """Object detection output is regenerated wholesale, so a retry must replace
+        (not append to) what an earlier, partly-failed run already stored."""
+        self.conn.execute("DELETE FROM objects WHERE photo_id=?", (photo_id,))
+        self.conn.commit()
 
     def objects_for_photo(self, photo_id: int):
         return self.conn.execute(
@@ -393,6 +535,35 @@ class LibraryDB:
 
     def list_people(self):
         return self.conn.execute("SELECT * FROM people ORDER BY name IS NULL, name").fetchall()
+
+    def merge_people(self, source_id: int, target_id: int):
+        """Moves every face of `source_id` into `target_id` and deletes the source
+        person. Merging is a human decision, so the moved faces become confirmed
+        (ground truth). If only the source was named, the target takes its name."""
+        source, target = self.get_person(source_id), self.get_person(target_id)
+        if source is None or target is None or source_id == target_id:
+            return
+        self.conn.execute(
+            "UPDATE faces SET person_id=?, confirmed=1, needs_review=0 WHERE person_id=?", (target_id, source_id))
+        if source["name"] and not target["name"]:
+            self.conn.execute("UPDATE people SET name=? WHERE id=?", (source["name"], target_id))
+        self.conn.execute("DELETE FROM merge_dismissals WHERE person_a IN (?, ?) OR person_b IN (?, ?)",
+                          (source_id, source_id, source_id, source_id))
+        self.conn.execute("DELETE FROM people WHERE id=?", (source_id,))
+        self.conn.commit()
+
+    def dismiss_merge(self, person_a: int, person_b: int):
+        a, b = sorted((person_a, person_b))
+        self.conn.execute("INSERT OR IGNORE INTO merge_dismissals (person_a, person_b) VALUES (?, ?)", (a, b))
+        self.conn.commit()
+
+    def dismissed_merges(self) -> set:
+        return {(r["person_a"], r["person_b"]) for r in self.conn.execute("SELECT * FROM merge_dismissals")}
+
+    def people_share_a_photo(self, person_a: int, person_b: int) -> bool:
+        return self.conn.execute(
+            "SELECT 1 FROM faces a JOIN faces b ON a.photo_id=b.photo_id "
+            "WHERE a.person_id=? AND b.person_id=? LIMIT 1", (person_a, person_b)).fetchone() is not None
 
     def get_person(self, person_id: int):
         return self.conn.execute("SELECT * FROM people WHERE id=?", (person_id,)).fetchone()
